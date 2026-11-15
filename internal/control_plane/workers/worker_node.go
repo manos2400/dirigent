@@ -30,6 +30,7 @@ import (
 	"cluster_manager/pkg/grpc_helpers"
 	"cluster_manager/pkg/synchronization"
 	"context"
+	"fmt"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -93,10 +94,16 @@ func (w *WorkerNode) GetLastHeartBeat() time.Time {
 }
 
 func (w *WorkerNode) CreateSandbox(ctx context.Context, info *proto.ServiceInfo, option ...grpc.CallOption) (*proto.SandboxCreationStatus, error) {
+	if w.wnConnection == nil {
+		return &proto.SandboxCreationStatus{Success: false}, fmt.Errorf("gRPC connection to worker node %s is not yet established", w.Name)
+	}
 	return w.wnConnection.CreateSandbox(ctx, info, option...)
 }
 
 func (w *WorkerNode) DeleteSandbox(ctx context.Context, id *proto.SandboxID, option ...grpc.CallOption) (*proto.ActionStatus, error) {
+	if w.wnConnection == nil {
+		return &proto.ActionStatus{Success: false}, fmt.Errorf("gRPC connection to worker node %s is not yet established", w.Name)
+	}
 	return w.wnConnection.DeleteSandbox(ctx, id, option...)
 }
 

@@ -224,8 +224,15 @@ func (c *ControlPlane) RegisterNode(ctx context.Context, in *proto.NodeInfo) (*p
 
 	c.NIStorage.Set(in.NodeID, wn)
 
-	go wn.ConnectToWorker()
-	wn.SetSchedulability(true)
+	go func() {
+		conn := wn.ConnectToWorker()
+		if conn != nil {
+			wn.SetSchedulability(true)
+			logrus.Infof("Node %s is now schedulable (gRPC connection established)", in.NodeID)
+		} else {
+			logrus.Errorf("Node %s failed to establish gRPC connection, not marking schedulable", in.NodeID)
+		}
+	}()
 
 	logrus.Infof("Node %s has been successfully registered with the control plane and cluster has %d nodes", in.NodeID, c.NIStorage.Len())
 

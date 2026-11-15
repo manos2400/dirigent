@@ -93,6 +93,10 @@ func registrationHandler(cpApi *api.CpApiServer) func(w http.ResponseWriter, r *
 				http.Error(w, "Invalid CPU value", http.StatusBadRequest)
 				return
 			}
+			if cpu <= 0 {
+				http.Error(w, "CPU value must be greater than zero", http.StatusBadRequest)
+				return
+			}
 		}
 
 		memory := 1
@@ -101,6 +105,10 @@ func registrationHandler(cpApi *api.CpApiServer) func(w http.ResponseWriter, r *
 			memory, err = strconv.Atoi(memSpec[0])
 			if err != nil {
 				http.Error(w, "Invalid memory value", http.StatusBadRequest)
+				return
+			}
+			if memory <= 0 {
+				http.Error(w, "Memory value must be greater than zero (MiB)", http.StatusBadRequest)
 				return
 			}
 		}
