@@ -76,17 +76,6 @@ func (ipm *IPManager) generateRawGatewayIP() (uint32, uint32) {
 	return thirdField, fourthField
 }
 
-func (ipm *IPManager) GenerateSingleIP() string {
-	var c, d uint32
-	for d == 0 || d == 255 {
-		c, d = ipm.generateRawGatewayIP()
-	}
-
-	ip := fmt.Sprintf("%s.%d.%d", ipm.networkPrefix, c, d)
-
-	return ip
-}
-
 func (ipm *IPManager) GenerateIPMACPair() (string, string) {
 	c, d := ipm.generateRawGatewayIP()
 

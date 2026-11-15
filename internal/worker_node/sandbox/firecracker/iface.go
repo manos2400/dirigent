@@ -26,19 +26,41 @@ package firecracker
 
 import (
 	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"runtime"
+
 	"github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 	"github.com/sirupsen/logrus"
-	"os"
-	"path/filepath"
 )
 
 const (
-	noDebugKernelArgs = "panic=1 pci=off nomodule reboot=k tsc=reliable quiet i8042.nokbd i8042.noaux 8250.nr_uarts=0 ipv6.disable=1"
-	debugKernelArgs   = "panic=1 pci=off nomodule reboot=k tsc=reliable quiet i8042.noaux ipv6.disable=1 console=ttyS0 random.trust_cpu=on"
-	ipKernelArg       = " ip=%s::%s:255.255.255.252::eth0:off"
-	pathToLog         = "/tmp/%s.log"
+	amd64NoDebugKernelArgs = "ro init=/sbin/fc-launcher panic=1 pci=off nomodule reboot=k tsc=reliable quiet i8042.nokbd i8042.noaux 8250.nr_uarts=0 ipv6.disable=1"
+	amd64DebugKernelArgs   = "ro init=/sbin/fc-launcher panic=1 pci=off nomodule reboot=k tsc=reliable quiet i8042.noaux ipv6.disable=1 console=ttyS0 random.trust_cpu=on"
+	arm64NoDebugKernelArgs = "ro init=/sbin/fc-launcher panic=1 pci=off nomodule reboot=k quiet ipv6.disable=1 random.trust_cpu=on"
+	arm64DebugKernelArgs   = "ro init=/sbin/fc-launcher panic=1 pci=off nomodule reboot=k quiet ipv6.disable=1 console=ttyS0 keep_bootcon random.trust_cpu=on"
+	ipKernelArg            = " ip=%s::%s:255.255.255.252::eth0:off"
+	pathToLog              = "/tmp/%s.log"
 )
+
+func guestKernelArgs(vmDebugMode bool) string {
+	switch runtime.GOARCH {
+	case "arm64":
+		if vmDebugMode {
+			return arm64DebugKernelArgs
+		}
+
+		return arm64NoDebugKernelArgs
+	default:
+		if vmDebugMode {
+			return amd64DebugKernelArgs
+		}
+
+		return amd64NoDebugKernelArgs
+	}
+}
 
 func makeSocketPath(vmmID string) string {
 	return filepath.Join(os.TempDir(), vmmID)
@@ -50,11 +72,21 @@ func makeFirecrackerConfig(vmcs *VMControlStructure, vmDebugMode bool, metadata 
 		return
 	}
 
-	kernelArgs := noDebugKernelArgs
-	if vmDebugMode {
-		kernelArgs = debugKernelArgs
-	}
+	kernelArgs := guestKernelArgs(vmDebugMode)
 	kernelArgs += fmt.Sprintf(ipKernelArg, vmcs.NetworkConfiguration.TapInternalIP, vmcs.NetworkConfiguration.TapExternalIP)
+
+	memoryMiB := vmcs.EffectiveVMMemoryMiB
+	if memoryMiB > math.MaxInt64 {
+		memoryMiB = math.MaxInt64
+	}
+
+	vcpus := vmcs.RequestedCPUCores
+	if vcpus == 0 {
+		vcpus = 1
+	}
+	if vcpus > math.MaxInt64 {
+		vcpus = math.MaxInt64
+	}
 
 	vmcs.VMConfig = &firecracker.Config{
 		SocketPath:      makeSocketPath(vmcs.SandboxID),
@@ -65,13 +97,12 @@ func makeFirecrackerConfig(vmcs *VMControlStructure, vmDebugMode bool, metadata 
 		Drives: []models.Drive{{
 			DriveID:      firecracker.String("1"),
 			PathOnHost:   firecracker.String(vmcs.FileSystemPath),
-			IsReadOnly:   firecracker.Bool(false),
+			IsReadOnly:   firecracker.Bool(true),
 			IsRootDevice: firecracker.Bool(true),
 		}},
-		// TODO: add resource requests/limits
 		MachineCfg: models.MachineConfiguration{
-			MemSizeMib: firecracker.Int64(2048),
-			VcpuCount:  firecracker.Int64(2),
+			MemSizeMib: firecracker.Int64(int64(memoryMiB)),
+			VcpuCount:  firecracker.Int64(int64(vcpus)),
 			Smt:        firecracker.Bool(false),
 		},
 		NetworkInterfaces: []firecracker.NetworkInterface{{

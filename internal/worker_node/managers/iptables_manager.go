@@ -26,7 +26,6 @@ package managers
 
 import (
 	"fmt"
-	"os/exec"
 	"strconv"
 
 	"github.com/sirupsen/logrus"
@@ -64,15 +63,32 @@ func AddRules(ipt *iptables.IPTables, sourcePort int, destIP string, destPort in
 	err = ipt.AppendUnique(
 		"nat",
 		"POSTROUTING",
+		"-d", destIP,
 		"-j", "MASQUERADE",
 	)
 	if err != nil {
-		logrus.Errorf("Error adding a POSTROUTING MASQUERADE - %s", err.Error())
+		logrus.Errorf("Error adding a POSTROUTING MASQUERADE for %s - %s", destIP, err.Error())
 	}
 
-	err = exec.Command("sudo", "iptables", "-P", "FORWARD", "ACCEPT").Run()
+	err = ipt.AppendUnique(
+		"filter",
+		"FORWARD",
+		"-p", "tcp", "-d", destIP, "--dport", strconv.Itoa(destPort),
+		"-j", "ACCEPT",
+	)
 	if err != nil {
-		logrus.Errorf("Error changing IP routing policy FORWARD ACCEPT - %s", err.Error())
+		logrus.Errorf("Error adding a FORWARD rule for inbound traffic to %s:%d - %s", destIP, destPort, err.Error())
+	}
+
+	err = ipt.AppendUnique(
+		"filter",
+		"FORWARD",
+		"-p", "tcp", "-s", destIP, "--sport", strconv.Itoa(destPort),
+		"-m", "state", "--state", "RELATED,ESTABLISHED",
+		"-j", "ACCEPT",
+	)
+	if err != nil {
+		logrus.Errorf("Error adding a FORWARD rule for return traffic from %s:%d - %s", destIP, destPort, err.Error())
 	}
 }
 
@@ -97,13 +113,34 @@ func DeleteRules(ipt *iptables.IPTables, sourcePort int, destIP string, destPort
 		logrus.Errorf("Error deleting an OUTPUT rule for %d->%s:%d - %s", sourcePort, destIP, destPort, err.Error())
 	}
 
-	// TODO: make sure it's deleted only after the last sandbox is deleted
-	/*err = ipt.Delete(
+	err = ipt.Delete(
 		"nat",
 		"POSTROUTING",
+		"-d", destIP,
 		"-j", "MASQUERADE",
 	)
 	if err != nil {
-		logrus.Errorf("Error deleting a POSTROUTING MASQUERADE - %s", err.Error())
-	}*/
+		logrus.Errorf("Error deleting a POSTROUTING MASQUERADE for %s - %s", destIP, err.Error())
+	}
+
+	err = ipt.Delete(
+		"filter",
+		"FORWARD",
+		"-p", "tcp", "-d", destIP, "--dport", strconv.Itoa(destPort),
+		"-j", "ACCEPT",
+	)
+	if err != nil {
+		logrus.Errorf("Error deleting a FORWARD rule for inbound traffic to %s:%d - %s", destIP, destPort, err.Error())
+	}
+
+	err = ipt.Delete(
+		"filter",
+		"FORWARD",
+		"-p", "tcp", "-s", destIP, "--sport", strconv.Itoa(destPort),
+		"-m", "state", "--state", "RELATED,ESTABLISHED",
+		"-j", "ACCEPT",
+	)
+	if err != nil {
+		logrus.Errorf("Error deleting a FORWARD rule for return traffic from %s:%d - %s", destIP, destPort, err.Error())
+	}
 }

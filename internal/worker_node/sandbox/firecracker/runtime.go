@@ -31,15 +31,18 @@ import (
 	"cluster_manager/internal/worker_node/sandbox/containerd"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/emptypb"
-	"os"
-	"path/filepath"
-	"time"
 )
+
+const snapshotCreationTimeout = 5 * time.Minute
 
 type Runtime struct {
 	sandbox.RuntimeInterface
@@ -51,7 +54,7 @@ type Runtime struct {
 	UseSnapshots bool
 
 	KernelPath     string
-	FileSystemPath string
+	RootfsBuilder  *RootfsBuilder
 	NetworkManager *NetworkPoolManager
 
 	SandboxManager  *managers.SandboxManager
@@ -67,7 +70,7 @@ type FirecrackerMetadata struct {
 }
 
 func NewFirecrackerRuntime(cpApi proto.CpiInterfaceClient, sandboxManager *managers.SandboxManager,
-	kernelPath string, fileSystemPath string, internalIPPrefix string, externalIPPrefix string,
+	kernelPath string, launcherPath string, imageStorePath string, internalIPPrefix string,
 	vmDebugMode bool, useSnapshots bool, networkPoolSize int) *Runtime {
 
 	DeleteAllSnapshots()
@@ -81,6 +84,11 @@ func NewFirecrackerRuntime(cpApi proto.CpiInterfaceClient, sandboxManager *manag
 		logrus.Fatal("Failed to start iptables utility. Terminating worker daemon.")
 	}
 
+	rootfsBuilder, err := NewRootfsBuilder(launcherPath, imageStorePath)
+	if err != nil {
+		logrus.Fatalf("Failed to create rootfs builder: %v", err)
+	}
+
 	return &Runtime{
 		cpApi:       cpApi,
 		idGenerator: managers.NewThreadSafeRandomGenerator(),
@@ -89,8 +97,8 @@ func NewFirecrackerRuntime(cpApi proto.CpiInterfaceClient, sandboxManager *manag
 		UseSnapshots: useSnapshots,
 
 		KernelPath:     kernelPath,
-		FileSystemPath: fileSystemPath,
-		NetworkManager: NewNetworkPoolManager(internalIPPrefix, externalIPPrefix, networkPoolSize),
+		RootfsBuilder:  rootfsBuilder,
+		NetworkManager: NewNetworkPoolManager(internalIPPrefix, networkPoolSize),
 
 		SandboxManager:  sandboxManager,
 		ProcessMonitor:  managers.NewProcessMonitor(),
@@ -99,12 +107,22 @@ func NewFirecrackerRuntime(cpApi proto.CpiInterfaceClient, sandboxManager *manag
 	}
 }
 
-func (fcr *Runtime) createVMCS() *VMControlStructure {
+func (fcr *Runtime) createVMCS(rootfsPath string, in *proto.ServiceInfo) *VMControlStructure {
+	requestedCPUCores := in.RequestedCpu
+	if requestedCPUCores == 0 {
+		requestedCPUCores = 1
+	}
+
+	effectiveMemoryMiB := computeEffectiveVMMemoryMiB(in.RequestedMemory)
+
 	return &VMControlStructure{
 		Context: context.Background(),
 
-		KernelPath:     fcr.KernelPath,
-		FileSystemPath: fcr.FileSystemPath,
+		KernelPath:           fcr.KernelPath,
+		FileSystemPath:       rootfsPath,
+		RequestedCPUCores:    requestedCPUCores,
+		RequestedMemoryMiB:   in.RequestedMemory,
+		EffectiveVMMemoryMiB: effectiveMemoryMiB,
 
 		SandboxID: fmt.Sprintf("firecracker-%d", fcr.idGenerator.Int()),
 	}
@@ -121,19 +139,31 @@ func createMetadata(in *proto.ServiceInfo, vmcs *VMControlStructure) *managers.M
 		IP:        vmcs.NetworkConfiguration.TapInternalIP,
 		GuestPort: int(in.PortForwarding.GuestPort),
 
-		ExitStatusChannel: make(chan uint32),
+		// Buffered so the process monitor can hand off an exit code even if the
+		// watcher has not started reading yet.
+		ExitStatusChannel: make(chan uint32, 1),
 	}
 }
 
 func (fcr *Runtime) CreateSandbox(ctx context.Context, in *proto.ServiceInfo) (*proto.SandboxCreationStatus, error) {
 	start := time.Now()
 
-	vmcs := fcr.createVMCS()
+	// Build (or retrieve from cache) the per-function rootfs
+	startImageFetch := time.Now()
+	functionRootfs, err := fcr.RootfsBuilder.GetOrBuild(in.Image)
+	if err != nil {
+		logrus.Errorf("Failed to build rootfs for image %s: %v", in.Image, err)
+		return &proto.SandboxCreationStatus{Success: false}, err
+	}
+	imageFetchDuration := time.Since(startImageFetch)
+
+	vmcs := fcr.createVMCS(functionRootfs.RootfsPath, in)
+	snapshotKey := SnapshotKey(in.Image, vmcs.EffectiveVMMemoryMiB, vmcs.RequestedCPUCores, in.PortForwarding.GuestPort)
 
 	startFindSnapshot := time.Now()
-	snapshot, _ := fcr.SnapshotManager.FindSnapshot(in.Image)
+	snapshot, _ := fcr.SnapshotManager.FindSnapshot(snapshotKey)
 	if snapshot != nil {
-		logrus.Infof("Snapshot found for image %s", in.Image)
+		logrus.Infof("Snapshot found for image %s (mem=%dMiB, cpu=%d)", in.Image, vmcs.EffectiveVMMemoryMiB, vmcs.RequestedCPUCores)
 	}
 	findSnapshotDuration := time.Since(startFindSnapshot)
 
@@ -146,7 +176,7 @@ func (fcr *Runtime) CreateSandbox(ctx context.Context, in *proto.ServiceInfo) (*
 	startConfigureMonitoring := time.Now()
 	metadata := createMetadata(in, vmcs)
 	metadata.HostPort = containerd.AssignRandomPort()
-	metadata.IP = vmcs.NetworkConfiguration.ExposedIP
+	metadata.IP = vmcs.NetworkConfiguration.VETHExternalIP
 
 	// VM process monitoring
 	vmPID, err := vmcs.VM.PID()
@@ -157,8 +187,13 @@ func (fcr *Runtime) CreateSandbox(ctx context.Context, in *proto.ServiceInfo) (*
 		logrus.Debugf("Failed to get PID of the virtual machine - %v", err)
 		return &proto.SandboxCreationStatus{Success: false}, err
 	}
+	vmcs.HostPID = vmPID
 
 	fcr.SandboxManager.AddSandbox(vmcs.SandboxID, metadata)
+
+	go containerd.WatchExitChannel(fcr.cpApi, metadata, func(metadata *managers.Metadata) string {
+		return metadata.RuntimeMetadata.(FirecrackerMetadata).VMCS.SandboxID
+	})
 	fcr.ProcessMonitor.AddChannel(uint32(vmPID), metadata.ExitStatusChannel)
 	configureMonitoringDuration := time.Since(startConfigureMonitoring)
 
@@ -167,10 +202,6 @@ func (fcr *Runtime) CreateSandbox(ctx context.Context, in *proto.ServiceInfo) (*
 	managers.AddRules(fcr.IPT, metadata.HostPort, metadata.IP, metadata.GuestPort)
 	iptablesDuration := time.Since(iptablesStart)
 
-	go containerd.WatchExitChannel(fcr.cpApi, metadata, func(metadata *managers.Metadata) string {
-		return metadata.RuntimeMetadata.(FirecrackerMetadata).VMCS.SandboxID
-	})
-
 	in.PortForwarding.HostPort = int32(metadata.HostPort)
 
 	logrus.Debug("Worker node part: ", time.Since(start).Milliseconds(), " ms")
@@ -178,24 +209,18 @@ func (fcr *Runtime) CreateSandbox(ctx context.Context, in *proto.ServiceInfo) (*
 	// blocking call
 	timeToPass, passed := managers.SendReadinessProbe(fmt.Sprintf("localhost:%d", metadata.HostPort))
 
-	// create a snapshot for the service if it does not exist
+	// Create a snapshot for the service if it does not exist. Only one sandbox per snapshot key
+	// does this: the others are already booted, and snapshotting would pause them for nothing.
 	startSnapshotCreation := time.Now()
-	if passed && fcr.UseSnapshots && !fcr.SnapshotManager.Exists(in.Image) {
-		ok, paths := CreateVMSnapshot(ctx, vmcs)
-
-		if !ok {
+	if passed && fcr.UseSnapshots && fcr.SnapshotManager.TryClaimCreation(snapshotKey) {
+		snapshot, vmUsable := fcr.captureSnapshot(vmcs, snapshotKey)
+		if snapshot == nil {
 			logrus.Warn("Due to failure, bypassing snapshot creation for image ", in.Image)
 		} else {
-			fcr.SnapshotManager.AddSnapshot(in.Image, paths)
-
 			logrus.Debug("Snapshot successfully created for image ", in.Image)
 		}
 
-		err = vmcs.VM.ResumeVM(ctx)
-		if err != nil {
-			logrus.Errorf("Failed to create a sandbox %s due to error resuming virtual machine.", vmcs.SandboxID)
-			passed = false // let the following code below take care of deletion
-		}
+		passed = vmUsable // a guest that could not be resumed is dead; let deletion below handle it
 	}
 	snapshotCreationDuration := time.Since(startSnapshotCreation)
 
@@ -206,7 +231,7 @@ func (fcr *Runtime) CreateSandbox(ctx context.Context, in *proto.ServiceInfo) (*
 			PortMappings: in.PortForwarding,
 			LatencyBreakdown: &proto.SandboxCreationBreakdown{
 				Total:               durationpb.New(time.Since(start)),
-				ImageFetch:          durationpb.New(0),
+				ImageFetch:          durationpb.New(imageFetchDuration),
 				SandboxCreate:       durationpb.New(vmCreateDuration),
 				NetworkSetup:        durationpb.New(netCreateDuration),
 				SandboxStart:        durationpb.New(vmStartDuration),
@@ -227,33 +252,63 @@ func (fcr *Runtime) CreateSandbox(ctx context.Context, in *proto.ServiceInfo) (*
 	}
 }
 
-func CreateVMSnapshot(ctx context.Context, vmcs *VMControlStructure) (bool, *SnapshotMetadata) {
-	err := vmcs.VM.PauseVM(ctx)
+func (fcr *Runtime) captureSnapshot(vmcs *VMControlStructure, snapshotKey string) (*SnapshotMetadata, bool) {
+	defer fcr.SnapshotManager.ReleaseCreation(snapshotKey)
+
+	ctx, cancel := context.WithTimeout(context.Background(), snapshotCreationTimeout)
+	defer cancel()
+
+	snapshot, vmUsable := CreateVMSnapshot(ctx, vmcs)
+	if snapshot == nil {
+		fcr.SnapshotManager.RecordFailure(snapshotKey)
+		return nil, vmUsable
+	}
+
+	fcr.SnapshotManager.AddSnapshot(snapshotKey, snapshot)
+
+	return snapshot, vmUsable
+}
+
+func CreateVMSnapshot(ctx context.Context, vmcs *VMControlStructure) (*SnapshotMetadata, bool) {
+	if err := vmcs.VM.PauseVM(ctx); err != nil {
+		logrus.Errorf("Error pausing virtual machine %s - %v", vmcs.SandboxID, err)
+		return nil, true
+	}
+
+	snapshot, err := dumpVMSnapshot(ctx, vmcs)
 	if err != nil {
-		logrus.Error("Error pausing virtual machine ", vmcs.SandboxID)
-		return false, nil
+		logrus.Errorf("Error creating a snapshot out of virtual machine %s - %v", vmcs.SandboxID, err)
 	}
 
-	snapshotDir := filepath.Join(os.TempDir(), "snapshots")
+	if err := vmcs.VM.ResumeVM(ctx); err != nil {
+		logrus.Errorf("Error resuming virtual machine %s after snapshotting - %v", vmcs.SandboxID, err)
+		return nil, false
+	}
+	refreshNetworkAfterResume(vmcs.NetworkConfiguration)
 
-	err = os.MkdirAll(snapshotDir, os.ModePerm)
-	if err != nil {
-		logrus.Error("Error creating a directory for snapshot storage")
-		return false, nil
+	return snapshot, true
+}
+
+func dumpVMSnapshot(ctx context.Context, vmcs *VMControlStructure) (*SnapshotMetadata, error) {
+	snapshotDir := snapshotDirectory()
+	if err := os.MkdirAll(snapshotDir, os.ModePerm); err != nil {
+		return nil, fmt.Errorf("creating snapshot directory %s: %w", snapshotDir, err)
 	}
 
-	snapshotPaths := &SnapshotMetadata{
-		MemoryPath:   filepath.Join(snapshotDir, fmt.Sprintf("memory-firecracker-%s", vmcs.SandboxID)),
-		SnapshotPath: filepath.Join(snapshotDir, fmt.Sprintf("snapshot-firecracker-%s", vmcs.SandboxID)),
+	snapshot := &SnapshotMetadata{
+		MemoryPath:   filepath.Join(snapshotDir, fmt.Sprintf("memory-%s", vmcs.SandboxID)),
+		SnapshotPath: filepath.Join(snapshotDir, fmt.Sprintf("snapshot-%s", vmcs.SandboxID)),
 	}
 
-	err = vmcs.VM.CreateSnapshot(ctx, snapshotPaths.MemoryPath, snapshotPaths.SnapshotPath)
-	if err != nil {
-		logrus.Error("Error creating a snapshot out of virtual machine ", vmcs.SandboxID)
-		return false, nil
+	if err := vmcs.VM.CreateSnapshot(ctx, snapshot.MemoryPath, snapshot.SnapshotPath); err != nil {
+		// remove partial dump
+		_ = os.Remove(snapshot.MemoryPath)
+		_ = os.Remove(snapshot.SnapshotPath)
+
+		return nil, fmt.Errorf("dumping snapshot: %w", err)
 	}
 
-	return true, snapshotPaths
+	return snapshot, nil
 }
 
 func (fcr *Runtime) DeleteSandbox(_ context.Context, in *proto.SandboxID) (*proto.ActionStatus, error) {
@@ -277,6 +332,8 @@ func (fcr *Runtime) DeleteSandbox(_ context.Context, in *proto.SandboxID) (*prot
 	if err != nil {
 		logrus.Errorf("Error deleting a sandbox - %v", err)
 	}
+
+	fcr.ProcessMonitor.RemoveChannel(uint32(sandboxMetadata.VMCS.HostPID))
 
 	// delete the network associated with the VM
 	fcr.NetworkManager.GiveUpNetwork(sandboxMetadata.VMCS.NetworkConfiguration)
@@ -302,7 +359,11 @@ func (fcr *Runtime) ValidateHostConfig() bool {
 	return true
 }
 
+func snapshotDirectory() string {
+	return filepath.Join(os.TempDir(), "snapshots")
+}
+
 func DeleteAllSnapshots() {
 	// don't handle error because the directory may not exist
-	_ = os.RemoveAll(filepath.Join(os.TempDir(), "snapshots"))
+	_ = os.RemoveAll(snapshotDirectory())
 }

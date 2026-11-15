@@ -31,6 +31,7 @@ import (
 	"cluster_manager/internal/worker_node/sandbox/containerd"
 	"cluster_manager/internal/worker_node/sandbox/fake_snapshot"
 	"cluster_manager/internal/worker_node/sandbox/firecracker"
+	"cluster_manager/pkg/cgroups"
 	"cluster_manager/pkg/config"
 	"cluster_manager/pkg/grpc_helpers"
 	"cluster_manager/pkg/hardware"
@@ -94,13 +95,22 @@ func NewWorkerNode(cpApi proto.CpiInterfaceClient, config config.WorkerNodeConfi
 			sandboxManager,
 		)
 	case "firecracker":
+		if config.SandboxCgroup != "" {
+			fd, err := cgroups.OpenFD(config.SandboxCgroup)
+			if err != nil {
+				logrus.Fatalf("Failed to set up sandbox cgroup %q: %v", config.SandboxCgroup, err)
+			}
+			firecracker.SetSandboxCgroupFD(fd)
+			logrus.Infof("Firecracker VMs will be placed under cgroup %q", config.SandboxCgroup)
+		}
+
 		runtimeInterface = firecracker.NewFirecrackerRuntime(
 			cpApi,
 			sandboxManager,
 			config.FirecrackerKernel,
-			config.FirecrackerFileSystem,
+			config.FirecrackerLauncher,
+			config.FirecrackerImageStorePath,
 			config.FirecrackerInternalIPPrefix,
-			config.FirecrackerExposedIPPrefix,
 			config.FirecrackerVMDebugMode,
 			config.FirecrackerUseSnapshots,
 			config.FirecrackerNetworkPoolSize,

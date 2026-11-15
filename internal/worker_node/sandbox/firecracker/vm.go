@@ -28,12 +28,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/firecracker-microvm/firecracker-go-sdk"
-	"github.com/sirupsen/logrus"
 	"os"
 	"os/exec"
 	"syscall"
 	"time"
+
+	"github.com/firecracker-microvm/firecracker-go-sdk"
+	"github.com/sirupsen/logrus"
 )
 
 type VMControlStructure struct {
@@ -44,13 +45,27 @@ type VMControlStructure struct {
 	NetworkConfiguration *NetworkConfig
 
 	SandboxID string
+	HostPID   int
 
 	KernelPath     string
 	FileSystemPath string
 
+	RequestedCPUCores    uint64
+	RequestedMemoryMiB   uint64
+	EffectiveVMMemoryMiB uint64
+
 	HostPort  int
 	GuestPort int
 }
+
+// sandboxCgroupFD, when >= 0, is a directory fd of the sandbox cgroup. Each
+// Firecracker process is cloned directly into it (CLONE_INTO_CGROUP) so all
+// guest memory is charged to the sandbox cgroup from the first instruction,
+// instead of leaking into the worker's cgroup. Set via SetSandboxCgroupFD.
+var sandboxCgroupFD = -1
+
+// SetSandboxCgroupFD enables placing Firecracker VMs into the given cgroup fd.
+func SetSandboxCgroupFD(fd int) { sandboxCgroupFD = fd }
 
 func getVMCommandBuild(vmcs *VMControlStructure) *exec.Cmd {
 	vmCommandBuild := firecracker.VMCommandBuilder{}.
@@ -64,7 +79,16 @@ func getVMCommandBuild(vmcs *VMControlStructure) *exec.Cmd {
 			WithStderr(os.Stderr)
 	}
 
-	return vmCommandBuild.Build(vmcs.Context)
+	cmd := vmCommandBuild.Build(vmcs.Context)
+
+	if sandboxCgroupFD >= 0 {
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			UseCgroupFD: true,
+			CgroupFD:    sandboxCgroupFD,
+		}
+	}
+
+	return cmd
 }
 
 func StartFirecrackerVM(networkManager *NetworkPoolManager, vmcs *VMControlStructure, vmDebugMode bool, snapshotMetadata *SnapshotMetadata) (error, time.Duration, time.Duration, time.Duration) {
@@ -76,7 +100,7 @@ func StartFirecrackerVM(networkManager *NetworkPoolManager, vmcs *VMControlStruc
 	tapEnd := time.Since(networkCreation)
 	logrus.Debug("Time to create network: ", tapEnd.Milliseconds(), " ms")
 
-	logrus.Debugf("VM %s TAP external = %s, TAP internal = %s, TAP MAC = %s, VETH external (%s) = %s, VETH internal = %s, and exposed through %s",
+	logrus.Debugf("VM %s TAP external = %s, TAP internal = %s, TAP MAC = %s, VETH external (%s) = %s, VETH internal = %s",
 		vmcs.SandboxID,
 		vmcs.NetworkConfiguration.TapExternalIP,
 		vmcs.NetworkConfiguration.TapInternalIP,
@@ -84,7 +108,6 @@ func StartFirecrackerVM(networkManager *NetworkPoolManager, vmcs *VMControlStruc
 		vmcs.NetworkConfiguration.VETHHostName,
 		vmcs.NetworkConfiguration.VETHExternalIP,
 		vmcs.NetworkConfiguration.VETHInternalIP,
-		vmcs.NetworkConfiguration.ExposedIP,
 	)
 
 	startVMCreation := time.Now()
@@ -103,6 +126,7 @@ func StartFirecrackerVM(networkManager *NetworkPoolManager, vmcs *VMControlStruc
 
 		vmcs.VMConfig = &firecracker.Config{
 			SocketPath:        vmcs.VMConfig.SocketPath,
+			LogPath:           vmcs.VMConfig.LogPath,
 			LogLevel:          vmcs.VMConfig.LogLevel,
 			Drives:            vmcs.VMConfig.Drives,
 			NetworkInterfaces: vmcs.VMConfig.NetworkInterfaces,
@@ -140,6 +164,7 @@ func StartFirecrackerVM(networkManager *NetworkPoolManager, vmcs *VMControlStruc
 
 			return err, tapEnd, vmCreateEnd, time.Since(timeVMStart)
 		}
+		refreshNetworkAfterResume(vmcs.NetworkConfiguration)
 	}
 
 	vmStartEnd := time.Since(timeVMStart)

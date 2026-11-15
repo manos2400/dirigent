@@ -26,9 +26,10 @@ package config
 
 import (
 	"cluster_manager/pkg/network"
-	"github.com/sirupsen/logrus"
 	"path/filepath"
 	"strings"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/spf13/viper"
 )
@@ -76,11 +77,13 @@ type WorkerNodeConfig struct {
 	CRIPath             string   `mapstructure:"criPath"`
 	CNIConfigPath       string   `mapstructure:"cniConfigPath"`
 	PrefetchImage       bool     `mapstructure:"prefetchImage"`
+	SandboxCgroup       string   `mapstructure:"sandboxCgroup"`
 
 	FirecrackerKernel           string `mapstructure:"firecrackerKernel"`
 	FirecrackerFileSystem       string `mapstructure:"firecrackerFileSystem"`
+	FirecrackerLauncher         string `mapstructure:"firecrackerLauncher"`
+	FirecrackerImageStorePath   string `mapstructure:"firecrackerImageStorePath"`
 	FirecrackerInternalIPPrefix string `mapstructure:"firecrackerInternalIPPrefix"`
-	FirecrackerExposedIPPrefix  string `mapstructure:"firecrackerExposedIPPrefix"`
 	FirecrackerVMDebugMode      bool   `mapstructure:"firecrackerVMDebugMode"`
 	FirecrackerUseSnapshots     bool   `mapstructure:"firecrackerUseSnapshots"`
 	FirecrackerNetworkPoolSize  int    `mapstructure:"firecrackerNetworkPoolSize"`
