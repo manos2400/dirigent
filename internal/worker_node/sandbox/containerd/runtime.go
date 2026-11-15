@@ -28,8 +28,11 @@ import (
 	"cluster_manager/api/proto"
 	"cluster_manager/internal/worker_node/managers"
 	"cluster_manager/internal/worker_node/sandbox"
+	"cluster_manager/pkg/cgroups"
 	"cluster_manager/pkg/config"
 	"context"
+	"time"
+
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/go-cni"
@@ -37,7 +40,6 @@ import (
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/emptypb"
-	"time"
 )
 
 type ContainerdRuntime struct {
@@ -52,6 +54,8 @@ type ContainerdRuntime struct {
 	ImageManager   *ImageManager
 	SandboxManager *managers.SandboxManager
 	ProcessMonitor *managers.ProcessMonitor
+
+	SandboxCgroup string
 }
 
 type ContainerdMetadata struct {
@@ -86,6 +90,13 @@ func NewContainerdRuntime(cpApi proto.CpiInterfaceClient, config config.WorkerNo
 		}
 	}
 
+	if config.SandboxCgroup != "" {
+		if err := cgroups.EnableControllers(config.SandboxCgroup, "cpu", "memory"); err != nil {
+			logrus.Fatalf("Failed to set up sandbox cgroup %q: %v", config.SandboxCgroup, err)
+		}
+		logrus.Infof("Sandboxes will be placed under cgroup %q", config.SandboxCgroup)
+	}
+
 	return &ContainerdRuntime{
 		cpApi: cpApi,
 
@@ -96,6 +107,8 @@ func NewContainerdRuntime(cpApi proto.CpiInterfaceClient, config config.WorkerNo
 		ImageManager:   imageManager,
 		SandboxManager: sandboxManager,
 		ProcessMonitor: managers.NewProcessMonitor(),
+
+		SandboxCgroup: config.SandboxCgroup,
 	}
 }
 
@@ -112,7 +125,7 @@ func (cr *ContainerdRuntime) CreateSandbox(grpcCtx context.Context, in *proto.Se
 		return &proto.SandboxCreationStatus{Success: false}, err
 	}
 
-	container, err, durationContainerCreation := CreateContainer(ctx, cr.ContainerdClient, image)
+	container, err, durationContainerCreation := CreateContainer(ctx, cr.ContainerdClient, image, cr.SandboxCgroup)
 	if err != nil {
 		logrus.Warn("Failed creating a container - ", err)
 		return &proto.SandboxCreationStatus{Success: false}, err
@@ -138,11 +151,15 @@ func (cr *ContainerdRuntime) CreateSandbox(grpcCtx context.Context, in *proto.Se
 		GuestPort: int(in.PortForwarding.GuestPort),
 		NetNs:     netNs,
 
-		ExitStatusChannel: make(chan uint32),
+		ExitStatusChannel: make(chan uint32, 1),
 	}
 
-	cr.ProcessMonitor.AddChannel(task.Pid(), metadata.ExitStatusChannel)
 	cr.SandboxManager.AddSandbox(container.ID(), metadata)
+
+	go WatchExitChannel(cr.cpApi, metadata, func(metadata *managers.Metadata) string {
+		return metadata.RuntimeMetadata.(ContainerdMetadata).Container.ID()
+	})
+	cr.ProcessMonitor.AddChannel(task.Pid(), metadata.ExitStatusChannel)
 	configureMonitoringDuration := time.Since(startConfigureMonitoring)
 
 	logrus.Debug("Sandbox creation took ", time.Since(start).Microseconds(), " μs (", container.ID(), ")")
@@ -156,10 +173,6 @@ func (cr *ContainerdRuntime) CreateSandbox(grpcCtx context.Context, in *proto.Se
 	logrus.Debug("IP tables configuration (add rule(s)) took ", durationIptables.Microseconds(), " μs")
 
 	in.PortForwarding.HostPort = int32(metadata.HostPort)
-
-	go WatchExitChannel(cr.cpApi, metadata, func(metadata *managers.Metadata) string {
-		return metadata.RuntimeMetadata.(ContainerdMetadata).Container.ID()
-	})
 
 	return &proto.SandboxCreationStatus{
 		Success:      true,
@@ -199,6 +212,8 @@ func (cr *ContainerdRuntime) DeleteSandbox(grpcCtx context.Context, in *proto.Sa
 
 	start = time.Now()
 	err := DeleteContainer(ctx, cr.CNIClient, metadata)
+
+	cr.ProcessMonitor.RemoveChannel(metadata.RuntimeMetadata.(ContainerdMetadata).Task.Pid())
 
 	if err != nil {
 		logrus.Warn(err)

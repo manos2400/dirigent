@@ -72,15 +72,20 @@ func FetchImage(ctx context.Context, client *containerd.Client, imageURL string)
 	return image, nil
 }
 
-func CreateContainer(ctx context.Context, client *containerd.Client, image containerd.Image) (containerd.Container, error, time.Duration) {
+func CreateContainer(ctx context.Context, client *containerd.Client, image containerd.Image, sandboxCgroup string) (containerd.Container, error, time.Duration) {
 	start := time.Now()
 
 	containerName := fmt.Sprintf("workload-%d", rand.Int())
 
+	specOpts := []oci.SpecOpts{oci.WithImageConfig(image)}
+	if sandboxCgroup != "" {
+		specOpts = append(specOpts, oci.WithCgroup("/"+sandboxCgroup+"/"+containerName))
+	}
+
 	container, err := client.NewContainer(ctx, containerName,
 		containerd.WithImage(image),
 		containerd.WithNewSnapshot(containerName, image),
-		containerd.WithNewSpec(oci.WithImageConfig(image)),
+		containerd.WithNewSpec(specOpts...),
 	)
 
 	if err != nil {
