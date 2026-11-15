@@ -130,6 +130,27 @@ Start the worker node
 cd cmd/worker_node; sudo /usr/local/go/bin/go run main.go --config cmd/config.yaml
 ```
 
+## Register multiple functions from one file
+
+Dirigent registers functions via the control-plane **registration server** (HTTP) on port `9091` by default.
+If you want a Knative-like experience (one file describing many functions), use the provided manifest-driven CLI:
+
+```bash
+go run cmd/register_functions/main.go --file cmd/register_functions/functions.yaml
+```
+
+The manifest format is **multi-document YAML** (one function per `---` document). See `cmd/register_functions/functions.yaml`:
+
+- `name`, `image`
+- `port_forwarding.guest_port`, `port_forwarding.protocol` (`tcp` or `udp`)
+- Optional: `requested_cpu`, `requested_memory`, `scaling_upper_bound`, `scaling_lower_bound`, `cold_start_sweep`
+
+You can override the registration server address if needed:
+
+```bash
+go run cmd/register_functions/main.go --file my_functions.yaml --address 0.0.0.0:9091
+```
+
 #### Potential problems
 
 In case you get a timeout, try to run the following command and then repeat the experiment.

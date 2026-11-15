@@ -1,0 +1,20 @@
+# Register multiple Dirigent functions with one file (multi-doc YAML).
+# Usage:
+#   go run cmd/register_functions/main.go --file cmd/register_functions/functions.yaml
+#
+# Each YAML document (separated by '---') is one function definition.
+# The CLI will POST each function to the control-plane registration server.
+# Default registration server address is: 0.0.0.0:9091
+# (override with: --address 0.0.0.0:9091)
+
+---
+name: "test"
+image: "docker.io/cvetkovic/dirigent_empty_function:latest"
+port_forwarding:
+  guest_port: 80
+  protocol: "tcp"
+requested_cpu: 1
+requested_memory: 1
+scaling_upper_bound: 10
+scaling_lower_bound: 0
+cold_start_sweep: false
