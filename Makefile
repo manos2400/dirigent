@@ -26,6 +26,22 @@ build_rootfs:
 		-s $(ROOT_DIR)/workload \
 		-r $(ROOT_DIR)/configs/firecracker/rootfs.ext4
 
+build_fc_launcher:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+		-o $(ROOT_DIR)/configs/firecracker/fc-launcher \
+		-trimpath -ldflags="-s -w" \
+		./cmd/fc_launcher
+
+build_function_rootfs: build_fc_launcher
+	@if [ -z "$(IMAGE)" ]; then \
+		echo "Usage: make build_function_rootfs IMAGE=<oci-image> [OUTPUT=<output-path>]"; \
+		exit 1; \
+	fi
+	sudo $(ROOT_DIR)/configs/firecracker/build_function_rootfs.sh \
+		-i $(IMAGE) \
+		-l $(ROOT_DIR)/configs/firecracker/fc-launcher \
+		$(if $(OUTPUT),-o $(OUTPUT))
+
 empty_container:
 	docker build \
 		-f Dockerfile \
