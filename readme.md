@@ -30,6 +30,23 @@
 
 </div>
 
+## About this fork
+
+This fork was developed for my diploma thesis at the National Technical University of Athens,
+[*Serverless Platforms Under Realistic Load*](https://artemis.ece.ntua.gr/handle/123456789/20465),
+which compares Dirigent and Knative under trace-derived load using FaaSRail on
+`amd64` and `arm64`. The main changes:
+
+- **Firecracker runtime for unmodified functions**: a per-function rootfs is built from the OCI
+  image and booted with a small init (`fc-launcher`), with guest memory sized from the request.
+- **Snapshot support**: restored guests get their clock resynchronised, and network changes for outbound access.
+- **Sandbox cgroups** for both containerd and Firecracker, plus scripts in `scripts/monitoring/`
+  that sample per-component CPU and memory.
+- **Manifest-based registration** (`cmd/register_functions`) and worker configs per runtime and
+  architecture.
+
+To cite the thesis, see [Citation](#citation).
+
 ## Software implementation
 
 See the `README.md` to get started with the code. 
@@ -280,5 +297,18 @@ pages = {369–384},
 numpages = {16},
 location = {Austin, TX, USA},
 series = {SOSP '24}
+}
+```
+
+The changes in this fork are described in:
+
+```
+@mastersthesis{Kolydakis2026Serverless,
+author = {Kolydakis, Emmanouil},
+title = {Serverless Platforms Under Realistic Load: A Comparative, Multi-Architecture Evaluation of Knative and Dirigent Across Runtimes Using FaaSRail},
+school = {National Technical University of Athens, School of Electrical and Computer Engineering},
+type = {Diploma thesis},
+year = {2026},
+url = {https://artemis.ece.ntua.gr/handle/123456789/20465}
 }
 ```
