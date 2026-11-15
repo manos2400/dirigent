@@ -38,12 +38,14 @@ type HardwareUsage struct {
 	MemoryUsage uint64
 }
 
+const bytesInMiB = uint64(1024 * 1024)
+
 func GetNumberCpus() uint64 {
 	return uint64(runtime.NumCPU())
 }
 
 func GetMemory() uint64 {
-	return memory.TotalMemory()
+	return memory.TotalMemory() / bytesInMiB
 }
 
 func getCpuUsage() uint64 {

@@ -25,9 +25,10 @@
 package managers
 
 import (
+	"sync"
+
 	"github.com/fearful-symmetry/garlic"
 	"github.com/sirupsen/logrus"
-	"sync"
 )
 
 const (
@@ -98,18 +99,32 @@ func (pm *ProcessMonitor) internalEventHandler() {
 			continue
 		}
 
-		pm.RLock()
 		for _, event := range events {
 			eData := event.EventData
-			PID := eData.Pid()
 
-			ch, ok := pm.NotifyChannels[PID]
-			if ok {
-				ch <- extractExitCode(&eData)
+			ch, ok := pm.takeChannel(eData.Pid())
+			if !ok {
+				continue
+			}
+
+			select {
+			case ch <- extractExitCode(&eData):
+			default:
 			}
 		}
-		pm.RUnlock()
 	}
+}
+
+func (pm *ProcessMonitor) takeChannel(PID uint32) (chan uint32, bool) {
+	pm.Lock()
+	defer pm.Unlock()
+
+	ch, ok := pm.NotifyChannels[PID]
+	if ok {
+		delete(pm.NotifyChannels, PID)
+	}
+
+	return ch, ok
 }
 
 func extractExitCode(data *garlic.EventData) uint32 {

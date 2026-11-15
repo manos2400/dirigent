@@ -26,12 +26,13 @@ package managers
 
 import (
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"io"
 	"net"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 func createProbingDialer(network, addr string) (net.Conn, error) {
@@ -86,7 +87,7 @@ func SendReadinessProbe(url string) (time.Duration, bool) {
 		Interval:        0.01,
 		ExponentialRate: 1.35,
 		RetryNumber:     0,
-		MaxDifference:   2,
+		MaxDifference:   5,
 	}
 
 	passed := true
@@ -101,6 +102,13 @@ func SendReadinessProbe(url string) (time.Duration, bool) {
 
 			res, err := httpProbingClient.Get(fmt.Sprintf("http://%s/health", url))
 			if err != nil || res == nil || (res != nil && res.StatusCode != http.StatusOK) {
+				// Debug: log every probe failure to diagnose network issues
+				elapsed := time.Since(start)
+				if res != nil {
+					logrus.Debugf("Readiness probe #%d for %s failed after %dms: status=%d err=%v", tries, url, elapsed.Milliseconds(), res.StatusCode, err)
+				} else {
+					logrus.Debugf("Readiness probe #%d for %s failed after %dms: err=%v", tries, url, elapsed.Milliseconds(), err)
+				}
 				handleBodyClosing(res)
 
 				toSleep := expBackoff.Next()
@@ -127,7 +135,7 @@ func SendReadinessProbe(url string) (time.Duration, bool) {
 	if passed {
 		logrus.Trace("Passed readiness probe for ", url, " from ", tries, " attempt in ", elapsed.Milliseconds(), " ms")
 	} else {
-		logrus.Error("Failed to pass readiness probe for ", url, ".")
+		logrus.Error("Failed to pass readiness probe for ", url, " after ", tries, " attempts over ", elapsed.Milliseconds(), " ms.")
 	}
 
 	return elapsed, passed
