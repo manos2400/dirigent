@@ -1,12 +1,21 @@
 services:
   redis:
-    image: redis
+    image: redis:latest
+    hostname: redis
+    command: redis-server --save 60 1 --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
     ports:
       - "6379:6379"
+    restart: unless-stopped
+    cgroup_parent: dirigent-redis.slice
 
+  # Replicas for the Raft control-plane configs (cmd/master_node/config_raft_*.yaml).
+  # Started only with: docker compose --profile raft up -d
   redis_1:
     image: redis:latest
     hostname: redis_1
+    profiles: [raft]
     volumes:
       - redis_1:/data
     ports:
@@ -15,6 +24,7 @@ services:
   redis_2:
     image: redis:latest
     hostname: redis_2
+    profiles: [raft]
     volumes:
       - redis_2:/data
     ports:
@@ -23,12 +33,14 @@ services:
   redis_3:
     image: redis:latest
     hostname: redis_3
+    profiles: [raft]
     volumes:
       - redis_3:/data
     ports:
       - '6382:6379'
 
 volumes:
+  redis_data:
   redis_1:
   redis_2:
   redis_3:

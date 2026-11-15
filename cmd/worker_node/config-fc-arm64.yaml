@@ -1,0 +1,18 @@
+workerNodeIp: "127.0.0.1"
+controlPlaneAddress: "127.0.0.1:9090"
+port: "10010"
+verbosity: "trace"
+criType: "firecracker"
+criPath: "/run/containerd/containerd.sock"
+cniConfigPath: "/home/manos/dirigent/configs/cni.conf"
+prefetchImage: true
+sandboxCgroup: "dirigent-sandbox"
+
+firecrackerKernel: "/home/manos/dirigent/configs/firecracker/vmlinux-6.1.151"
+firecrackerFileSystem: "/home/manos/dirigent/configs/firecracker/rootfs.ext4"
+firecrackerLauncher: "/home/manos/dirigent/configs/firecracker/fc-launcher"
+firecrackerImageStorePath: "/home/manos/fc-function-rootfs"
+firecrackerInternalIPPrefix: "100"
+firecrackerVMDebugMode: false
+firecrackerUseSnapshots: true
+firecrackerNetworkPoolSize: 256
